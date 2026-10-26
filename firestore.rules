@@ -1,0 +1,143 @@
+rules_version = '2';
+
+// Regras de segurança do app da Efraim Barbearia.
+// Copie este arquivo inteiro em: Firebase > Firestore Database > Regras > Publicar.
+//
+// Como funciona o acesso:
+// - Todo aparelho entra no Firebase de forma anônima.
+// - Cliente: entra com CPF + senha. O app cria um documento em /sessoes/{aparelho}
+//   com o "hash" da senha; a regra só aceita se ele bater com /senhas/{cliente}.
+// - Administrador: igual, em /sessoesAdmin/{aparelho}, conferindo com /config/admin.
+// - As senhas (hash) nunca podem ser lidas por ninguém.
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function logado() { return request.auth != null; }
+    function caminho(col, id) { return /databases/$(database)/documents/$(col)/$(id); }
+
+    // ---- administrador
+    function ehAdmin() {
+      return logado() && exists(caminho('sessoesAdmin', request.auth.uid));
+    }
+
+    // ---- cliente (leitura)
+    function temSessao() { return logado() && exists(caminho('sessoes', request.auth.uid)); }
+    function minhaCid() { return get(caminho('sessoes', request.auth.uid)).data.cid; }
+    function ehCliente(cid) { return temSessao() && minhaCid() == cid; }
+    function meuTok() { return get(caminho('clientes', minhaCid())).data.tok; }
+
+    // ---- cliente (gravação em lote, enxerga o resultado do próprio lote)
+    function ehClienteDepois(cid) {
+      return logado()
+        && existsAfter(caminho('sessoes', request.auth.uid))
+        && getAfter(caminho('sessoes', request.auth.uid)).data.cid == cid;
+    }
+
+    // ================= senhas dos clientes (ninguém lê)
+    match /senhas/{cid} {
+      allow read: if false;
+      // cadastro: só cria se o CPF ainda não existe (criar algo que já existe vira "update")
+      allow create: if logado()
+        && request.resource.data.keys().hasOnly(['hash'])
+        && request.resource.data.hash is string
+        && request.resource.data.hash.size() == 64;
+      allow update: if
+        // a barbearia cria uma senha provisória
+        (ehAdmin() && request.resource.data.keys().hasOnly(['hash', 'redefinidaEm'])
+          && request.resource.data.hash.size() == 64)
+        ||
+        // o próprio cliente troca, provando a senha atual
+        (ehCliente(cid) && request.resource.data.keys().hasOnly(['hash', 'anterior', 'trocadaEm'])
+          && request.resource.data.anterior == resource.data.hash
+          && request.resource.data.hash.size() == 64);
+      allow delete: if ehAdmin();
+    }
+
+    // ================= sessões de cliente (uma por aparelho)
+    match /sessoes/{uid} {
+      allow read: if logado() && (request.auth.uid == uid || ehAdmin());
+      allow create, update: if logado() && request.auth.uid == uid
+        && request.resource.data.keys().hasOnly(['cid', 'hash', 'em'])
+        && request.resource.data.hash == getAfter(caminho('senhas', request.resource.data.cid)).data.hash;
+      allow delete: if logado() && (request.auth.uid == uid || ehAdmin());
+    }
+
+    // ================= cadastro dos clientes
+    match /clientes/{cid} {
+      allow read: if ehAdmin() || ehCliente(cid);
+      allow create: if ehClienteDepois(cid)
+        && request.resource.data.tok is string
+        && request.resource.data.tok.size() >= 16;
+      allow update: if ehAdmin()
+        || (ehCliente(cid)
+            && request.resource.data.cpf == resource.data.cpf
+            && request.resource.data.tok == resource.data.tok
+            && request.resource.data.get('premiosUsados', 0) == resource.data.get('premiosUsados', 0)
+            && request.resource.data.get('indicacoes', []) == resource.data.get('indicacoes', []));
+      allow delete: if ehAdmin();
+    }
+
+    // ================= horários ocupados (todos veem que o horário está ocupado, mas não de quem)
+    match /ocupados/{slot} {
+      allow read: if logado();
+      allow create: if ehAdmin() || (temSessao() && request.resource.data.tok == meuTok());
+      allow update: if ehAdmin();
+      allow delete: if ehAdmin() || (temSessao() && resource.data.tok == meuTok());
+    }
+
+    // ================= chat
+    match /chat/{cid} {
+      allow read, create, update: if ehAdmin() || ehCliente(cid);
+      allow delete: if ehAdmin();
+      match /msgs/{msg} {
+        allow read, create: if ehAdmin() || ehCliente(cid);
+        allow update, delete: if ehAdmin();
+      }
+    }
+
+    // ================= ranking do jogo (identificado por código anônimo)
+    match /ranking/{tok} {
+      allow read: if logado();
+      allow write: if ehAdmin() || (temSessao() && tok == meuTok());
+    }
+
+    // ================= serviços, preços e horários (todos leem; só a barbearia muda)
+    match /ajustes/{doc} {
+      allow read: if true;
+      allow write: if ehAdmin();
+    }
+
+    // ================= caixa
+    match /despesas/{id} {
+      allow read, write: if ehAdmin();
+    }
+    match /fechamentos/{id} {
+      allow read, write: if ehAdmin();
+    }
+
+    // ================= acesso do administrador
+    match /config/publico {
+      allow read: if true;
+      allow write: if ehAdmin() || existsAfter(caminho('sessoesAdmin', request.auth.uid));
+    }
+    match /config/admin {
+      allow read: if false;
+      // primeiro acesso: só pode ser criado uma vez
+      allow create: if logado()
+        && request.resource.data.keys().hasOnly(['hash', 'criadoEm'])
+        && request.resource.data.hash.size() == 64;
+      allow update: if ehAdmin()
+        && request.resource.data.keys().hasOnly(['hash', 'criadoEm'])
+        && request.resource.data.hash.size() == 64;
+      allow delete: if false;
+    }
+    match /sessoesAdmin/{uid} {
+      allow read: if logado() && (request.auth.uid == uid || ehAdmin());
+      allow create, update: if logado() && request.auth.uid == uid
+        && request.resource.data.keys().hasOnly(['hash', 'em'])
+        && request.resource.data.hash == getAfter(/databases/$(database)/documents/config/admin).data.hash;
+      allow delete: if logado() && (request.auth.uid == uid || ehAdmin());
+    }
+  }
+}

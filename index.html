@@ -558,10 +558,14 @@ body.cli .cartao{background:#121212;border-color:#262626;box-shadow:0 20px 50px 
   <main id="viewEsqueci" class="auth" hidden>
     <div class="cartao">
       <h2>Esqueci minha senha</h2>
-      <p class="sub">Por segurança, quem cria uma senha provisória para você é a barbearia. Depois de entrar, troque por uma senha sua em “Trocar senha”.</p>
+      <p class="sub"><b>1.</b> Peça um código à barbearia pelo WhatsApp. <b>2.</b> Digite o código abaixo e crie sua nova senha. O código vale por 30 minutos.</p>
       <form class="form login" id="formEsqueci" novalidate>
-        <label class="full">Seu CPF<input id="eCpf" inputmode="numeric" placeholder="000.000.000-00" maxlength="14"></label>
-        <div class="full"><button class="btn largo" type="submit">Pedir nova senha pelo WhatsApp</button></div>
+        <label class="full">Seu CPF<input id="eCpf" inputmode="numeric" placeholder="000.000.000-00" maxlength="14" autocomplete="username"></label>
+        <div class="full"><button class="btn ghost largo" type="button" id="btnPedirCodigo">1. Pedir código pelo WhatsApp</button></div>
+        <label class="full">Código recebido <em>(6 números)</em><input id="eCodigo" inputmode="numeric" maxlength="6" placeholder="000000" autocomplete="one-time-code" style="font-family:var(--mono);letter-spacing:.3em;font-size:20px"></label>
+        <label class="full">Nova senha <em>(mínimo 6 caracteres)</em><input id="eSenha" type="password" autocomplete="new-password"></label>
+        <label class="full">Repita a nova senha<input id="eSenha2" type="password" autocomplete="new-password"></label>
+        <div class="full"><button class="btn largo" type="submit" id="btnNovaSenha">2. Criar nova senha e entrar</button></div>
       </form>
       <p class="err" id="erroEsqueci" hidden></p>
       <div class="sucesso" id="esqueciOk" hidden></div>
@@ -1151,22 +1155,18 @@ function celFid(id,c){
 $("tabClientes").addEventListener("click", e=>{ const b=e.target.closest("[data-redef]"); if(b) redefinirSenhaCliente(b.dataset.redef); });
 function redefinirSenhaCliente(cid){
   const c=S.clientes[cid]; if(!c) return;
-  abrirModal({ titulo:`Nova senha para ${c.nome.split(" ")[0]}`, ok:"Salvar senha provisória",
-    corpo:`<p class="sub" style="margin:0">Crie uma senha provisória e mande para o cliente pelo WhatsApp. Ele pode trocar depois em “Trocar senha”. Quem estiver logado com a senha antiga é desconectado.</p>
-      <div class="form" style="margin-top:10px"><label class="full">Senha provisória <em>(mínimo ${SENHA_MIN} caracteres)</em><input id="rsNova" autocomplete="off" value="Efraim${Math.floor(1000+Math.random()*9000)}"></label></div>`,
-    aoConfirmar: async (el)=>{
-      const nova=el.querySelector("#rsNova").value.trim();
-      if(nova.length<SENHA_MIN){ erroModal(`A senha precisa ter pelo menos ${SENHA_MIN} caracteres.`); return false; }
-      const hash=await hashCliente(cid,nova);
-      if(S.modo==="db"){
-        await db.doc("senhas/"+cid).set({hash, redefinidaEm:new Date().toISOString()});
-        const ss=await db.collection("sessoes").where("cid","==",cid).get();
-        const b=db.batch(); ss.docs.forEach(d=>{ if(d.id!==S.uid) b.delete(db.doc("sessoes/"+d.id)); }); await b.commit();
-      } else S.senhasDemo[cid]=hash;
-      const txt=encodeURIComponent(`Olá, ${c.nome.split(" ")[0]}! Sua senha provisória do app da Efraim é: ${nova}
-Entre com seu CPF e essa senha, e depois troque em "Trocar senha".`);
+  const nome=c.nome.split(" ")[0];
+  abrirModal({ titulo:`Código de senha para ${nome}`, ok:"Gerar código",
+    corpo:`<p class="sub" style="margin:0">O app cria um código de 6 números, válido por ${CODIGO_MIN} minutos. Mande para ${esc(nome)} pelo WhatsApp: ele digita o código em “Esqueci minha senha” e cria a nova senha sozinho.</p>`,
+    aoConfirmar: async ()=>{
+      const a=new Uint32Array(1); crypto.getRandomValues(a); const cod=String(a[0]%1000000).padStart(6,"0");
+      const hash=await hashCodigo(cid,cod); const expira=new Date(Date.now()+CODIGO_MIN*60000);
+      if(S.modo==="db") await db.doc("resets/"+cid).set({hash, expira:firebase.firestore.Timestamp.fromDate(expira), criadoEm:new Date().toISOString()});
+      else S.resetsDemo[cid]={hash, expira:expira.getTime()};
+      const link=location.origin+location.pathname;
+      const txt=encodeURIComponent(`Olá, ${nome}! Seu código para criar uma nova senha no app da Efraim é: ${cod}\nEle vale por ${CODIGO_MIN} minutos.\nAbra o app (${link}), toque em "Esqueci minha senha", digite seu CPF, o código e a nova senha.`);
       const w=soDig(c.whatsapp);
-      abrirModal({titulo:"Senha provisória salva", ok:"Fechar", corpo:`<p>Senha de ${esc(c.nome.split(" ")[0])}: <b style="font-family:var(--mono)">${esc(nova)}</b></p>${w?`<a class="btn" style="display:inline-block;text-decoration:none" href="https://wa.me/55${w}?text=${txt}" target="_blank" rel="noopener">Enviar pelo WhatsApp</a>`:""}`, aoConfirmar:()=>{}});
+      abrirModal({titulo:`Código de ${nome}`, ok:"Fechar", corpo:`<p style="margin:0 0 6px">Código válido até <b>${hm(expira)}</b>:</p><p style="font:700 34px var(--mono);letter-spacing:.2em;margin:0 0 12px">${cod}</p>${w?`<a class="btn" style="display:inline-block;text-decoration:none" href="https://wa.me/55${w}?text=${txt}" target="_blank" rel="noopener">Enviar pelo WhatsApp</a>`:`<p class="sub">Este cliente não tem WhatsApp no cadastro. Passe o código por outro meio.</p>`}`, aoConfirmar:()=>{}});
       $("mVoltar").hidden=true;
       return false;
     } });
@@ -1271,13 +1271,47 @@ $("lnkCadastro").addEventListener("click",()=>irPara("cadastro"));
 $("lnkEsqueci").addEventListener("click",()=>irPara("esqueci"));
 document.querySelectorAll("[data-voltar]").forEach(b=>b.addEventListener("click",()=>irPara("login")));
 $("eCpf").addEventListener("input",()=>{ $("eCpf").value=fmtCpf($("eCpf").value); });
-$("formEsqueci").addEventListener("submit",e=>{
-  e.preventDefault(); const ok=$("esqueciOk"), err=$("erroEsqueci"); ok.hidden=true; err.hidden=true;
-  if(!cpfValido($("eCpf").value)){ err.textContent="Digite um CPF válido."; err.hidden=false; return; }
+const hashCodigo = (cid, cod) => sha256("efraim-cod:"+cid+":"+cod);
+const CODIGO_MIN = 30;
+S.resetsDemo={};
+$("eCodigo").addEventListener("input",()=>{ $("eCodigo").value=soDig($("eCodigo").value).slice(0,6); });
+$("btnPedirCodigo").addEventListener("click",()=>{
+  const err=$("erroEsqueci"); err.hidden=true;
+  if(!cpfValido($("eCpf").value)){ err.textContent="Digite seu CPF primeiro."; err.hidden=false; return; }
   const fim=soDig($("eCpf").value).slice(-3);
-  const txt=encodeURIComponent(`Olá! Esqueci minha senha do app da Efraim. Meu CPF termina em ${fim}. Pode criar uma senha provisória para mim?`);
-  ok.innerHTML=`Toque no botão abaixo para mandar o pedido pelo WhatsApp. A barbearia responde com uma senha provisória.<br><a class="btn" style="display:inline-block;margin-top:10px;text-decoration:none" href="https://wa.me/5521980049065?text=${txt}" target="_blank" rel="noopener">Abrir WhatsApp</a>`;
-  ok.hidden=false;
+  const txt=encodeURIComponent(`Olá! Esqueci minha senha do app da Efraim. Meu CPF termina em ${fim}. Pode me mandar um código para criar uma nova senha?`);
+  window.open(`https://wa.me/5521980049065?text=${txt}`,"_blank","noopener");
+  $("esqueciOk").innerHTML="Pedido aberto no WhatsApp. Quando receber o código, digite abaixo e crie sua nova senha."; $("esqueciOk").hidden=false;
+  setTimeout(()=>$("eCodigo").focus(),300);
+});
+$("formEsqueci").addEventListener("submit",async e=>{
+  e.preventDefault(); const ok=$("esqueciOk"), err=$("erroEsqueci"); ok.hidden=true; err.hidden=true;
+  const cpf=$("eCpf").value, cod=$("eCodigo").value, s1=$("eSenha").value, s2=$("eSenha2").value;
+  if(!cpfValido(cpf)){ err.textContent="Digite um CPF válido."; err.hidden=false; return; }
+  if(!/^\d{6}$/.test(cod)){ err.textContent="Digite o código de 6 números que a barbearia enviou."; err.hidden=false; return; }
+  if(s1.length<SENHA_MIN){ err.textContent=`A nova senha precisa ter pelo menos ${SENHA_MIN} caracteres.`; err.hidden=false; return; }
+  if(s1!==s2){ err.textContent="As duas senhas não são iguais."; err.hidden=false; return; }
+  const cid=cidDe(cpf); const hCod=await hashCodigo(cid,cod); const hNova=await hashCliente(cid,s1); const agora=new Date().toISOString();
+  const btn=$("btnNovaSenha"); btn.disabled=true; btn.textContent="Salvando…";
+  try{
+    if(S.modo==="db"){
+      const b=db.batch();
+      b.set(db.doc("senhas/"+cid),{hash:hNova, codigo:hCod, redefinidaEm:agora});
+      b.delete(db.doc("resets/"+cid));
+      b.set(db.doc("sessoes/"+S.uid),{cid, hash:hNova, em:agora});
+      await b.commit();
+    } else {
+      const rs=S.resetsDemo[cid]; if(!rs || rs.hash!==hCod || Date.now()>rs.expira) throw {code:"permission-denied"};
+      delete S.resetsDemo[cid]; S.senhasDemo[cid]=hNova;
+    }
+    ["eCpf","eCodigo","eSenha","eSenha2"].forEach(i=>$(i).value="");
+    await entrarComo(cid); S.telaCli="login";
+    toast("Nova senha criada. Bem-vindo de volta!");
+  }catch(e2){
+    err.textContent = (e2&&e2.code==="permission-denied") ? "Código inválido ou vencido. Confira os números ou peça um código novo à barbearia." : "Não foi possível salvar. Verifique a conexão e tente de novo.";
+    err.hidden=false;
+  }
+  btn.disabled=false; btn.textContent="2. Criar nova senha e entrar";
 });
 $("formLogin").addEventListener("submit", async e=>{
   e.preventDefault(); const err=$("erroLogin"); err.hidden=true;
@@ -1695,7 +1729,7 @@ function renderClientes(){
     return {id,c,app:ags.filter(a=>a.origem!=="balcao").length,feitos:feitos.length,ult,cad:c.cadastradoEm||""}; })
     .filter(r=>!q || (r.c.nome||"").toLowerCase().includes(q) || ((r.c.whatsapp||"")+(r.c.cpf||"")).replace(/\D/g,"").includes(q.replace(/\D/g,"")||"§"))
     .sort((a,b)=>(b.cad||"").localeCompare(a.cad||"") || (a.c.nome||"").localeCompare(b.c.nome||""));
-  $("tabClientes").innerHTML=rows.length?rows.map(r=>`<tr><td><b>${esc(r.c.nome)}</b>${r.c.email?`<br><span style="color:var(--muted);font-size:13px">${esc(r.c.email)}</span>`:""}${r.c.nascimento?`<br><span style="color:var(--muted);font-size:13px">Aniversário ${r.c.nascimento.slice(8,10)}/${r.c.nascimento.slice(5,7)}</span>`:""}${r.c.codigo?`<br><span style="color:var(--muted);font-size:13px">Código ${esc(r.c.codigo)}${(r.c.indicacoes||[]).length?` · ${(r.c.indicacoes||[]).length} indicação(ões)`:""}</span>`:""}${r.c.indicadoPor?`<br><span style="color:var(--muted);font-size:13px">Indicado por ${esc(r.c.indicadoPor)}${r.c.indicacaoCreditada?" ✓":""}</span>`:""}</td><td style="white-space:nowrap">${r.cad?fmtDia(new Date(r.cad)):(r.c.origem==="balcao"?"balcão":"—")}${r.cad && Date.now()-new Date(r.cad)<7*864e5?' <span class="pill p-novo">novo</span>':""}</td><td style="white-space:nowrap;font-family:var(--mono)">${esc(r.c.cpf||"—")}<br><button class="copy" data-redef="${esc(r.id)}">Redefinir senha</button></td><td style="white-space:nowrap">${esc(r.c.whatsapp||"—")}</td><td class="num">${r.app}</td><td class="num">${r.feitos}</td><td style="white-space:nowrap">${r.ult?fmtDia(parseIni(r.ult)):"—"}</td><td style="white-space:nowrap">${celFid(r.id,r.c)}</td></tr>`).join(""):`<tr><td colspan="8"><div class="empty">Nenhum cliente ainda. Cada pessoa que agendar aparece aqui com os dados que preencheu.</div></td></tr>`;
+  $("tabClientes").innerHTML=rows.length?rows.map(r=>`<tr><td><b>${esc(r.c.nome)}</b>${r.c.email?`<br><span style="color:var(--muted);font-size:13px">${esc(r.c.email)}</span>`:""}${r.c.nascimento?`<br><span style="color:var(--muted);font-size:13px">Aniversário ${r.c.nascimento.slice(8,10)}/${r.c.nascimento.slice(5,7)}</span>`:""}${r.c.codigo?`<br><span style="color:var(--muted);font-size:13px">Código ${esc(r.c.codigo)}${(r.c.indicacoes||[]).length?` · ${(r.c.indicacoes||[]).length} indicação(ões)`:""}</span>`:""}${r.c.indicadoPor?`<br><span style="color:var(--muted);font-size:13px">Indicado por ${esc(r.c.indicadoPor)}${r.c.indicacaoCreditada?" ✓":""}</span>`:""}</td><td style="white-space:nowrap">${r.cad?fmtDia(new Date(r.cad)):(r.c.origem==="balcao"?"balcão":"—")}${r.cad && Date.now()-new Date(r.cad)<7*864e5?' <span class="pill p-novo">novo</span>':""}</td><td style="white-space:nowrap;font-family:var(--mono)">${esc(r.c.cpf||"—")}<br><button class="copy" data-redef="${esc(r.id)}">Gerar código de senha</button></td><td style="white-space:nowrap">${esc(r.c.whatsapp||"—")}</td><td class="num">${r.app}</td><td class="num">${r.feitos}</td><td style="white-space:nowrap">${r.ult?fmtDia(parseIni(r.ult)):"—"}</td><td style="white-space:nowrap">${celFid(r.id,r.c)}</td></tr>`).join(""):`<tr><td colspan="8"><div class="empty">Nenhum cliente ainda. Cada pessoa que agendar aparece aqui com os dados que preencheu.</div></td></tr>`;
 }
 function hbars(el, pares, fmt=v=>v){
   const max=Math.max(1,...pares.map(p=>p[1]));
